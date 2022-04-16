@@ -1,7 +1,7 @@
-// TODO:
-// How do identify if a transaction is Segwit and a segwit type, e.g. P2WKH, P2WSH?
 const std = @import("std");
+const conensus = @import("./consensus.zig");
 const hash = @import("./hash.zig");
+const types = @import("./types.zig");
 
 const fmt = std.fmt;
 const io = std.io;
@@ -9,21 +9,23 @@ const mem = std.mem;
 const testing = std.testing;
 
 const ArrayList = std.ArrayList;
+const witness_scale_factor = conensus.witness_scale_factor;
 const double_sha256 = hash.double_sha256;
 const U256 = hash.U256;
+const VarInt = types.VarInt;
 
 pub const Transaction = struct {
-    // The protocol version (2 is the current default).
+    /// The protocol version (2 is the current default).
     version: i32 = 2,
 
-    // Transaction inputs to fund the transaction.
+    /// Transaction inputs to fund the transaction.
     inputs: ArrayList(TxIn),
 
-    // Transaction outputs used to send coins to receivers.
+    /// Transaction outputs used to send coins to receivers.
     outputs: ArrayList(TxOut),
 
-    // The time in blocks where the transaction will become valid. 0 indicates
-    // it's valid immediately.
+    /// The time in blocks where the transaction will become valid. 0 indicates
+    /// it's valid immediately.
     lock_time: u32,
 
     gpa: *mem.Allocator,
@@ -48,11 +50,11 @@ pub const Transaction = struct {
         const inputs_len = blk: {
             var len = try reader.readIntNative(u8);
             if (len == 0x00) {
-                // This is a segwit transaction because 0x00 is set as the marker.
+                // This is a Segwit transaction because 0x00 is set as the marker.
                 const flag = try reader.readIntNative(u8);
                 if (flag != 0x01) return Transaction.Error.InvalidSegwitFlag;
 
-                // The next byte should be the length of inputs for segwit txs.
+                // The next byte should be the length of inputs for Segwit txs.
                 len = try reader.readIntNative(u8);
             }
 
@@ -102,9 +104,9 @@ pub const Transaction = struct {
         try self.internal_write(writer, true);
     }
 
-    // The internal_write function has an include_witness flag that is mainly
-    // used for serializing and hashing a txid. This gives the caller the option
-    // to include the witness data in the transaction hash or omitting it (Segwit).
+    /// The internal_write function has an include_witness flag that is mainly
+    /// used for serializing and hashing a txid. This gives the caller the option
+    /// to include the witness data in the transaction hash or omitting it (Segwit).
     fn internal_write(self: @This(), writer: anytype, include_witness: bool) !void {
         try writer.writeIntLittle(i32, self.version);
 
@@ -153,6 +155,61 @@ pub const Transaction = struct {
         mem.reverse(u8, output);
     }
 
+    /// Returns the weight of the transaction. This method is able to add Segwit
+    /// weights if the transaction is Segwit.
+    fn weight(self: @This()) usize {
+        return self.internal_scale_size(witness_scale_factor);
+    }
+
+    /// Returns the actual serialized byte size of the transaction, byte for byte.
+    fn size(self: @This()) usize {
+        return self.internal_scale_size(1);
+    }
+
+    /// Returns the size of the serialized transactiona according to a particular
+    /// scale factor. This can be used to calculate the weight of the transaction
+    /// given the witness scale factor or bytes 1-to-1.
+    fn internal_scale_size(self: @This(), scale_factor: usize) usize {
+        var input_weight: usize = 0;
+        var inputs_with_witnesses: usize = 0;
+        for (self.inputs.items) |input| {
+            // Multiply non-segwit bytes by the scale_factor to apply the weight
+            // per bytes.
+            input_weight += scale_factor * input.serialized_len();
+
+            // Add Segwit bytes without applying the scale factor, each byte
+            // only has 1 weight.
+            if (input.witness) |witness| {
+                inputs_with_witnesses += 1;
+                input_weight += witness.serialized_len();
+            }
+        }
+
+        // If this is a Segwit transaction, add 2 bytes at 1 weight each to
+        // reflect the Segwit marker byte and Segwit flag byte in the transaction.
+        if (inputs_with_witnesses > 0) input_weight += 2;
+
+        var output_size: usize = 0;
+        for (self.outputs.items) |output|
+            output_size += output.serialized_len();
+
+        // Sum all other non-Segwit bytes and apply the scale_factor for the
+        // weight.
+        var non_input_weight = scale_factor *
+            (@sizeOf(@TypeOf(self.version)) +
+            VarInt.size(self.inputs.items.len) +
+            VarInt.size(self.outputs.items.len) +
+            output_size +
+            @sizeOf(@TypeOf(self.lock_time)));
+
+        const total_weight = non_input_weight + input_weight;
+
+        return switch (inputs_with_witnesses) {
+            0 => total_weight,
+            else => total_weight + self.inputs.items.len - inputs_with_witnesses,
+        };
+    }
+
     fn deinit(self: @This()) void {
         for (self.inputs.items) |input| input.deinit();
         self.inputs.deinit();
@@ -162,19 +219,19 @@ pub const Transaction = struct {
     }
 };
 
-// A reference to a Transaction Output used in Transaction Inputs.
+// A reference to a previous Transaction Output used in Transaction Inputs.
 pub const OutPoint = struct {
     // TODO CCDLE12: This should be reversed
     // The tranaction id that's being referenced.
     txid: U256,
 
-    // The index position of the referenced output in the transactions output.
+    // The index position of the referenced previous output in the transactions output.
     vout: u32,
 
     fn read(reader: anytype) !OutPoint {
         // TODO: Make sure I know exactly why the txid is littleendian/bigendian
         // txid needs to be reversed.
-        var txid = try reader.readBytesNoEof(32); // TODO: Use a name variable for the size
+        var txid = try reader.readBytesNoEof(32);
         mem.reverse(u8, &txid);
 
         return OutPoint{
@@ -189,6 +246,11 @@ pub const OutPoint = struct {
 
         try writer.writeAll(&txid);
         try writer.writeIntLittle(u32, self.vout);
+    }
+
+    // TODO TMP: comments
+    fn serialized_len(self: @This()) usize {
+        return self.txid.len + @sizeOf(@TypeOf(self.vout));
     }
 };
 
@@ -208,6 +270,15 @@ pub const TxIn = struct {
     witness: ?Witness,
 
     gpa: *mem.Allocator,
+
+    // TODO: comments
+    // - Excludes witness
+    fn serialized_len(self: @This()) usize {
+        return self.previous_output.serialized_len() +
+            VarInt.size(self.script_sig.len) +
+            self.script_sig.len +
+            @sizeOf(@TypeOf(self.sequence));
+    }
 
     fn read(gpa: *mem.Allocator, reader: anytype) !TxIn {
         const previous_output = try OutPoint.read(reader);
@@ -259,6 +330,12 @@ pub const TxOut = struct {
 
     gpa: *mem.Allocator,
 
+    fn serialized_len(self: @This()) usize {
+        return @sizeOf(@TypeOf(self.value)) +
+            VarInt.size(self.script_pubkey.len) +
+            self.script_pubkey.len;
+    }
+
     // TODO: Not sure if this is correct,need to test these values
     fn read(gpa: *mem.Allocator, reader: anytype) !TxOut {
         const value = try reader.readIntNative(u64);
@@ -298,6 +375,11 @@ pub const Witness = struct {
 
     // Index of hte start of the second to last witness.
     second_to_last: usize,
+
+    fn serialized_len(self: @This()) usize {
+        return VarInt.size(self.witness_elements) +
+            self.content.items.len;
+    }
 
     fn read(gpa: *mem.Allocator, reader: anytype) !Witness {
         const num_witnesses = try reader.readByte();
@@ -340,14 +422,14 @@ pub const Witness = struct {
     }
 };
 
-test "deserialize a segwit transaction" {
+test "deserialize a Segwit transaction" {
     // Segwit Transaction:
     // https://blockstream.info/tx/f5864806e3565c34d1b41e716f72609d00b55ea5eac5b924c9719a842ef42206
     // NOTE: I think it's a P2SH according to the block explorer?
     const tx_hex =
         "02000000" ++ // version
         "00" ++ // marker
-        "01" ++ // segwit flag
+        "01" ++ // Segwit flag
         "01" ++ // number inputs
         "595895ea20179de87052b4046dfe6fd515860505d6511a9004cf12a1f93cac7c" ++ // prev_hash
         "01000000" ++ // prev_index
@@ -441,4 +523,9 @@ test "deserialize a segwit transaction" {
         try fmt.hexToBytes(&buf, expected_wtx_hash),
         &wtx_hash,
     );
+
+    // Test the weight calculations for the transaction are accurate.
+    const expected_weight = 442;
+    try testing.expectEqual(tx.weight(), expected_weight);
+    try testing.expectEqual(tx.size(), tx_bytes.len);
 }

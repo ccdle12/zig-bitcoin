@@ -7,8 +7,9 @@ const testing = std.testing;
 ///
 /// The maximum size a varint can hold is the max of a u64. The VarInt is encoded
 /// in such a way that we don't need to use the full 8 bytes for a u64 if the
-/// VarInt integer can be expressed in less than 8 bytes. Below is an example
-/// of the VarInts at different sizes:
+/// VarInt can be expressed in less than 8 bytes. 
+///
+/// Below is an example of the VarInts at different sizes:
 ///
 /// Size:             Example:            Prefix:
 /// <= OxFC             12                  None
