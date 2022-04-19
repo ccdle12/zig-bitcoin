@@ -123,10 +123,10 @@ pub const Transaction = struct {
             try writer.writeIntLittle(u8, 0x01);
         }
 
-        try writer.writeIntLittle(u8, @intCast(u8, self.inputs.items.len));
+        try VarInt.init(self.inputs.items.len).write(writer);
         for (self.inputs.items) |input| try input.write(writer);
 
-        try writer.writeIntLittle(u8, @intCast(u8, self.outputs.items.len));
+        try VarInt.init(self.outputs.items.len).write(writer);
         for (self.outputs.items) |output| try output.write(writer);
 
         if (is_segwit and include_witness) {
@@ -166,6 +166,12 @@ pub const Transaction = struct {
         return self.internal_scale_size(1);
     }
 
+    /// Returns the virtual size of the transaction. This is an alternative measurment
+    /// of the bytes, where one vbyte is equal to four weight units.
+    fn vsize(self: @This()) !usize {
+        return try std.math.divCeil(usize, self.weight(), witness_scale_factor);
+    }
+
     /// Returns the size of the serialized transactiona according to a particular
     /// scale factor. This can be used to calculate the weight of the transaction
     /// given the witness scale factor or bytes 1-to-1.
@@ -197,8 +203,8 @@ pub const Transaction = struct {
         // weight.
         var non_input_weight = scale_factor *
             (@sizeOf(@TypeOf(self.version)) +
-            VarInt.size(self.inputs.items.len) +
-            VarInt.size(self.outputs.items.len) +
+            VarInt.init(self.inputs.items.len).size() +
+            VarInt.init(self.outputs.items.len).size() +
             output_size +
             @sizeOf(@TypeOf(self.lock_time)));
 
@@ -275,7 +281,7 @@ pub const TxIn = struct {
     // - Excludes witness
     fn serialized_len(self: @This()) usize {
         return self.previous_output.serialized_len() +
-            VarInt.size(self.script_sig.len) +
+            VarInt.init(self.script_sig.len).size() +
             self.script_sig.len +
             @sizeOf(@TypeOf(self.sequence));
     }
@@ -332,7 +338,7 @@ pub const TxOut = struct {
 
     fn serialized_len(self: @This()) usize {
         return @sizeOf(@TypeOf(self.value)) +
-            VarInt.size(self.script_pubkey.len) +
+            VarInt.init(self.script_pubkey.len).size() +
             self.script_pubkey.len;
     }
 
@@ -377,7 +383,7 @@ pub const Witness = struct {
     second_to_last: usize,
 
     fn serialized_len(self: @This()) usize {
-        return VarInt.size(self.witness_elements) +
+        return VarInt.init(self.witness_elements).size() +
             self.content.items.len;
     }
 
@@ -528,4 +534,5 @@ test "deserialize a Segwit transaction" {
     const expected_weight = 442;
     try testing.expectEqual(tx.weight(), expected_weight);
     try testing.expectEqual(tx.size(), tx_bytes.len);
+    try testing.expectEqual(tx.vsize(), 111);
 }
