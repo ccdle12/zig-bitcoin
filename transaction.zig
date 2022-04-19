@@ -137,12 +137,16 @@ pub const Transaction = struct {
         try writer.writeIntLittle(u32, self.lock_time);
     }
 
-    fn wtxid(self: @This(), output: *U256) !void {
-        try self.internal_hash(output, true);
-    }
-
+    /// Returns the transaction hash that does not include the witness data. This
+    /// is the default behaviour and should be used for all transactions.
     fn txid(self: @This(), output: *U256) !void {
         try self.internal_hash(output, false);
+    }
+
+    /// Returns the transaction hash that includes the witness data. This is NOT
+    /// the default behaviour and should be used only for testing purposes.
+    fn wtxid(self: @This(), output: *U256) !void {
+        try self.internal_hash(output, true);
     }
 
     fn internal_hash(self: @This(), output: *U256, include_witness: bool) !void {
