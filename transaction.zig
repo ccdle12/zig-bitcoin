@@ -1,5 +1,5 @@
 const std = @import("std");
-const conensus = @import("./consensus.zig");
+const consensus = @import("./consensus.zig");
 const hash = @import("./hash.zig");
 const types = @import("./types.zig");
 
@@ -9,7 +9,7 @@ const mem = std.mem;
 const testing = std.testing;
 
 const ArrayList = std.ArrayList;
-const witness_scale_factor = conensus.witness_scale_factor;
+const witness_scale_factor = consensus.witness_scale_factor;
 const double_sha256 = hash.double_sha256;
 const U256 = hash.U256;
 const VarInt = types.VarInt;
