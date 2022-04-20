@@ -48,14 +48,14 @@ pub const Transaction = struct {
         const version = try reader.readIntNative(i32);
 
         const inputs_len = blk: {
-            var len = try reader.readIntNative(u8);
-            if (len == 0x00) {
-                // This is a Segwit transaction because 0x00 is set as the marker.
+            var len = try VarInt.read(reader);
+            if (len.inner == 0x00) {
+                // This is a Segwit transaction because 0x00 is set as the marker byte.
                 const flag = try reader.readIntNative(u8);
                 if (flag != 0x01) return Transaction.Error.InvalidSegwitFlag;
 
                 // The next byte should be the length of inputs for Segwit txs.
-                len = try reader.readIntNative(u8);
+                len = try VarInt.read(reader);
             }
 
             break :blk len;
@@ -65,19 +65,19 @@ pub const Transaction = struct {
             var in = std.ArrayList(TxIn).init(gpa);
 
             var i: usize = 0;
-            while (i < inputs_len) : (i += 1)
+            while (i < inputs_len.inner) : (i += 1)
                 try in.append(try TxIn.read(gpa, reader));
 
             break :blk in;
         };
 
         // TODO: The witness comes later in the tx, need to assign them to the correct inputs later?
-        const outputs_len = try reader.readIntNative(u8);
+        const outputs_len = try VarInt.read(reader);
         const outputs = blk: {
             var out = std.ArrayList(TxOut).init(gpa);
 
             var i: usize = 0;
-            while (i < outputs_len) : (i += 1)
+            while (i < outputs_len.inner) : (i += 1)
                 try out.append(try TxOut.read(gpa, reader));
 
             break :blk out;
