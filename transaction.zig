@@ -143,8 +143,7 @@ pub const Transaction = struct {
         try self.internal_hash(output, false);
     }
 
-    /// Returns the transaction hash that includes the witness data. This is NOT
-    /// the default behaviour and should be used only for testing purposes.
+    /// Returns the transaction hash that includes the witness data.
     fn wtxid(self: @This(), output: *U256) !void {
         try self.internal_hash(output, true);
     }
