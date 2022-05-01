@@ -49,8 +49,9 @@ pub const Transaction = struct {
 
         const inputs_len = blk: {
             var len = try VarInt.read(reader);
+
+            // This is a Segwit transaction because 0x00 is set as the marker byte.
             if (len.inner == 0x00) {
-                // This is a Segwit transaction because 0x00 is set as the marker byte.
                 const flag = try reader.readIntNative(u8);
                 if (flag != 0x01) return Transaction.Error.InvalidSegwitFlag;
 
@@ -161,12 +162,12 @@ pub const Transaction = struct {
     /// Returns the weight of the transaction. This method is able to add Segwit
     /// weights if the transaction is Segwit.
     fn weight(self: @This()) usize {
-        return self.internal_scale_size(witness_scale_factor);
+        return self.internal_scale_size(witness_scale_factor, true);
     }
 
     /// Returns the actual serialized byte size of the transaction, byte for byte.
     fn size(self: @This()) usize {
-        return self.internal_scale_size(1);
+        return self.internal_scale_size(1, true);
     }
 
     /// Returns the virtual size of the transaction. This is an alternative measurment
@@ -175,10 +176,18 @@ pub const Transaction = struct {
         return try std.math.divCeil(usize, self.weight(), witness_scale_factor);
     }
 
-    /// Returns the size of the serialized transactiona according to a particular
+    /// The size of a transaction without witness data.
+    fn stripped_size(self: @This()) usize {
+        return self.internal_scale_size(1, false);
+    }
+
+    /// Returns the size of the serialized transaction according to a particular
     /// scale factor. This can be used to calculate the weight of the transaction
     /// given the witness scale factor or bytes 1-to-1.
-    fn internal_scale_size(self: @This(), scale_factor: usize) usize {
+    ///
+    /// include_witness flag also allows the witness to be ignored when calculating
+    /// the transaction size, even if the witness exists.
+    fn internal_scale_size(self: @This(), scale_factor: usize, include_witness: bool) usize {
         var input_weight: usize = 0;
         var inputs_with_witnesses: usize = 0;
         for (self.inputs.items) |input| {
@@ -188,9 +197,11 @@ pub const Transaction = struct {
 
             // Add Segwit bytes without applying the scale factor, each byte
             // only has 1 weight.
-            if (input.witness) |witness| {
-                inputs_with_witnesses += 1;
-                input_weight += witness.serialized_len();
+            if (include_witness) {
+                if (input.witness) |witness| {
+                    inputs_with_witnesses += 1;
+                    input_weight += witness.serialized_len();
+                }
             }
         }
 
@@ -538,4 +549,8 @@ test "deserialize a Segwit transaction" {
     try testing.expectEqual(tx.weight(), expected_weight);
     try testing.expectEqual(tx.size(), tx_bytes.len);
     try testing.expectEqual(tx.vsize(), 111);
+
+    // Test the stripped_size() can be returned correctly.
+    const expected_strippedsize = (expected_weight - tx_bytes.len) / (witness_scale_factor - 1);
+    try testing.expectEqual(tx.stripped_size(), expected_strippedsize);
 }
