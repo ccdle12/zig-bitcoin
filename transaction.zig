@@ -47,11 +47,14 @@ pub const Transaction = struct {
     fn read(gpa: *mem.Allocator, reader: anytype) !Transaction {
         const version = try reader.readIntNative(i32);
 
+        var is_segwit = false;
         const inputs_len = blk: {
             var len = try VarInt.read(reader);
 
             // This is a Segwit transaction because 0x00 is set as the marker byte.
             if (len.inner == 0x00) {
+                is_segwit = true;
+
                 const flag = try reader.readIntNative(u8);
                 if (flag != 0x01) return Transaction.Error.InvalidSegwitFlag;
 
@@ -87,8 +90,10 @@ pub const Transaction = struct {
         // TODO:
         // - Assign to inputs, but how do we know if we have multiple???
         // - input[0].witness = witness;
-        const witness = try Witness.read(gpa, reader);
-        inputs.items[0].witness = witness;
+        if (is_segwit) {
+            const witness = try Witness.read(gpa, reader);
+            inputs.items[0].witness = witness;
+        }
 
         const lock_time = try reader.readIntNative(u32);
 
@@ -292,7 +297,6 @@ pub const TxIn = struct {
     gpa: *mem.Allocator,
 
     // TODO: comments
-    // - Excludes witness
     fn serialized_len(self: @This()) usize {
         return self.previous_output.serialized_len() +
             VarInt.init(self.script_sig.len).size() +
@@ -303,6 +307,8 @@ pub const TxIn = struct {
     fn read(gpa: *mem.Allocator, reader: anytype) !TxIn {
         const previous_output = try OutPoint.read(reader);
 
+        // TODO: The script_sig does NOT include the script_sig,
+        // maybe I should include it in the script_sig variable?
         const script_sig = blk: {
             const len = try reader.readByte();
             const sig = try gpa.alloc(u8, len);
@@ -325,10 +331,10 @@ pub const TxIn = struct {
 
     fn write(self: @This(), writer: anytype) !void {
         try self.previous_output.write(writer);
+
+        try writer.writeIntLittle(u8, @intCast(u8, self.script_sig.len));
         try writer.writeAll(self.script_sig);
-        if (self.script_sig.len == 0) {
-            try writer.writeIntLittle(u8, 0x00);
-        }
+
         try writer.writeIntLittle(u32, self.sequence);
     }
 
@@ -356,12 +362,14 @@ pub const TxOut = struct {
             self.script_pubkey.len;
     }
 
-    // TODO: Not sure if this is correct,need to test these values
     fn read(gpa: *mem.Allocator, reader: anytype) !TxOut {
         const value = try reader.readIntNative(u64);
 
+        // TODO: The script_pubkey does NOT include the script_pubkey_len,
+        // maybe I should include it in the script_pubkey variable?
         const script_pubkey_len = try reader.readByte();
         const script_pubkey = try gpa.alloc(u8, script_pubkey_len);
+        errdefer gpa.free(script_pubkey);
         _ = try reader.read(script_pubkey);
 
         return TxOut{
@@ -441,6 +449,77 @@ pub const Witness = struct {
         self.content.deinit();
     }
 };
+
+test "non-segwit P2PKH tx" {
+    const tx_hex =
+        "02000000" ++ // version
+        "01" ++ // number of inputs
+        "855f90bf2f355457fb5c294f820457822a818c301bc8a395ca44209f8a6df768" ++ // prev_hash
+        "00000000" ++ // prev_index
+        "6a47304402207c8e61ffe680f21725e4e79306830b76e58b1b42f75f70a117c0fd6532a9e8960220536293629339a41ae72b23098ced2fe48425f94f7711b37ad466884bc02e4cef0121023abc81b1328f631fd90aca9d6eade0b260758deb9c6a1805915f1dc1491afd2e" ++ // script_sig
+        "fdffffff" ++ // sequence number
+        "01" ++ // number outputs
+        "5397000000000000" ++ // value of output
+        "1976a914f36e80fa8a3f3b2b6b2bf3f4daa428099206157888ac" ++ // script_pubkey
+        "d6c60800"; // lock time
+
+    var buf: [1024]u8 = undefined;
+    const tx_bytes = try fmt.hexToBytes(&buf, tx_hex);
+    const tx = try Transaction.read(
+        testing.allocator,
+        io.fixedBufferStream(tx_bytes).reader(),
+    );
+    defer tx.deinit();
+
+    // Assert that the tx can be serialized back to the original structure.
+    var serialized = ArrayList(u8).init(testing.allocator);
+    defer serialized.deinit();
+    try tx.write(serialized.writer());
+
+    try testing.expectEqualSlices(
+        u8,
+        try fmt.hexToBytes(&buf, tx_hex),
+        serialized.items,
+    );
+
+    // Assert the correct txid can be generated.
+    var tx_hash: U256 = undefined;
+    try tx.txid(&tx_hash);
+    const expected_tx_hash = try fmt.hexToBytes(&buf, "0556e5e4206759d0114151c27b67ffb593b0c05ea25a2a5f0d52b161687a4061");
+    try testing.expectEqualSlices(u8, &tx_hash, expected_tx_hash);
+
+    // Assert the transaction is deserialized correctly.
+    try testing.expectEqual(tx.version, 2);
+    const inputs = tx.inputs.items;
+    try testing.expectEqual(inputs.len, 1);
+
+    var prev_txid = try fmt.hexToBytes(&buf, "855f90bf2f355457fb5c294f820457822a818c301bc8a395ca44209f8a6df768");
+    mem.reverse(u8, prev_txid);
+    try testing.expectEqualSlices(u8, &inputs[0].previous_output.txid, prev_txid);
+    try testing.expectEqual(inputs[0].previous_output.vout, 0);
+    try testing.expectEqual(inputs[0].script_sig.len, 106);
+    try testing.expectEqual(inputs[0].sequence, 0xFFFFFFFD);
+    try testing.expectEqual(inputs[0].witness, null);
+
+    const outputs = tx.outputs.items;
+    try testing.expectEqual(outputs.len, 1);
+
+    // TODO: Should maybe convert this to full satoshis representation?
+    try testing.expectEqual(outputs[0].value, 38739);
+    try testing.expectEqual(outputs[0].script_pubkey.len, 25);
+    try testing.expectEqualSlices(
+        u8,
+        outputs[0].script_pubkey,
+        try fmt.hexToBytes(&buf, "76a914f36e80fa8a3f3b2b6b2bf3f4daa428099206157888ac"),
+    );
+    try testing.expectEqual(tx.lock_time, 575190);
+
+    // Test the weight calculations for the transaction are accurate.
+    const expected_weight = 764;
+    try testing.expectEqual(tx.weight(), expected_weight);
+    try testing.expectEqual(tx.size(), tx_bytes.len);
+    try testing.expectEqual(tx.vsize(), 191);
+}
 
 test "deserialize a Segwit transaction" {
     // Segwit Transaction:
