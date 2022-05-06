@@ -55,8 +55,8 @@ pub const Transaction = struct {
             if (len.inner == 0x00) {
                 is_segwit = true;
 
-                const flag = try reader.readIntNative(u8);
-                if (flag != 0x01) return Transaction.Error.InvalidSegwitFlag;
+                const segwit_flag = try reader.readIntNative(u8);
+                if (segwit_flag != 0x01) return Transaction.Error.InvalidSegwitFlag;
 
                 // The next byte should be the length of inputs for Segwit txs.
                 len = try VarInt.read(reader);
@@ -76,8 +76,8 @@ pub const Transaction = struct {
         };
 
         // TODO: The witness comes later in the tx, need to assign them to the correct inputs later?
-        const outputs_len = try VarInt.read(reader);
         const outputs = blk: {
+            const outputs_len = try VarInt.read(reader);
             var out = std.ArrayList(TxOut).init(gpa);
 
             var i: usize = 0;
@@ -136,8 +136,7 @@ pub const Transaction = struct {
         for (self.outputs.items) |output| try output.write(writer);
 
         if (is_segwit and include_witness) {
-            for (self.inputs.items) |input|
-                try input.witness.?.write(writer);
+            for (self.inputs.items) |input| try input.witness.?.write(writer);
         }
 
         try writer.writeIntLittle(u32, self.lock_time);
@@ -175,7 +174,7 @@ pub const Transaction = struct {
         return self.internal_scale_size(1, true);
     }
 
-    /// Returns the virtual size of the transaction. This is an alternative measurment
+    /// Returns the virtual size of the transaction. This is an alternative measurement
     /// of the bytes, where one vbyte is equal to four weight units.
     fn vsize(self: @This()) !usize {
         return try std.math.divCeil(usize, self.weight(), witness_scale_factor);
@@ -244,6 +243,82 @@ pub const Transaction = struct {
     }
 };
 
+// Transaction Input used to reference coins to consume in a Tranasction.
+pub const TxIn = struct {
+    // The previous transaction output that is going to be used.
+    previous_output: OutPoint,
+
+    // The opcodes as bytes used in the unlocking script to access the previous_output.
+    script_sig: ArrayList(u8),
+
+    // Used to prioritize conflicting transactions. By default will be set to
+    // 0xFFFFFFFF to not use this feature.
+    sequence: u32 = 0xFFFFFFFF,
+
+    // TODO: Witness data comments
+    witness: ?Witness,
+
+    gpa: *mem.Allocator,
+
+    // TODO: comments
+    fn serialized_len(self: @This()) usize {
+        const script_sig_len = blk: {
+            var len = VarInt.init(self.script_sig.items.len).size();
+            if (self.script_sig.items.len > 0)
+                len = self.script_sig.items.len;
+
+            break :blk len;
+        };
+
+        return self.previous_output.serialized_len() +
+            script_sig_len +
+            @sizeOf(@TypeOf(self.sequence));
+    }
+
+    fn read(gpa: *mem.Allocator, reader: anytype) !TxIn {
+        const previous_output = try OutPoint.read(reader);
+
+        var script_sig = ArrayList(u8).init(gpa);
+        errdefer script_sig.deinit();
+
+        const script_sig_len = try reader.readByte();
+        if (script_sig_len > 0) {
+            try script_sig.append(script_sig_len);
+
+            var i: usize = 0;
+            while (i < script_sig_len) : (i += 1) {
+                const byte = try reader.readByte();
+                try script_sig.append(byte);
+            }
+        }
+
+        return TxIn{
+            .previous_output = previous_output,
+            .script_sig = script_sig,
+            .sequence = try reader.readIntNative(u32),
+            .witness = null,
+            .gpa = gpa,
+        };
+    }
+
+    fn write(self: @This(), writer: anytype) !void {
+        try self.previous_output.write(writer);
+
+        if (self.script_sig.items.len > 0) {
+            try writer.writeAll(self.script_sig.items);
+        } else {
+            try writer.writeIntLittle(u8, 0);
+        }
+
+        try writer.writeIntLittle(u32, self.sequence);
+    }
+
+    pub fn deinit(self: @This()) void {
+        self.script_sig.deinit();
+        if (self.witness) |w| w.deinit();
+    }
+};
+
 // A reference to a previous Transaction Output used in Transaction Inputs.
 pub const OutPoint = struct {
     // TODO CCDLE12: This should be reversed
@@ -279,98 +354,37 @@ pub const OutPoint = struct {
     }
 };
 
-// Transaction Input used to reference coins to consume in a Tranasction.
-pub const TxIn = struct {
-    // The previous transaction output that is going to be used.
-    previous_output: OutPoint,
-
-    // The opcodes as bytes used in the unlocking script to access the previous_output.
-    script_sig: []const u8,
-
-    // Used to prioritize conflicting transactions. By default will be set to
-    // 0xFFFFFFFF to not use this feature.
-    sequence: u32 = 0xFFFFFFFF,
-
-    // TODO: Witness data???
-    witness: ?Witness,
-
-    gpa: *mem.Allocator,
-
-    // TODO: comments
-    fn serialized_len(self: @This()) usize {
-        return self.previous_output.serialized_len() +
-            VarInt.init(self.script_sig.len).size() +
-            self.script_sig.len +
-            @sizeOf(@TypeOf(self.sequence));
-    }
-
-    fn read(gpa: *mem.Allocator, reader: anytype) !TxIn {
-        const previous_output = try OutPoint.read(reader);
-
-        // TODO: The script_sig does NOT include the script_sig,
-        // maybe I should include it in the script_sig variable?
-        const script_sig = blk: {
-            const len = try reader.readByte();
-            const sig = try gpa.alloc(u8, len);
-            errdefer gpa.free(sig);
-            _ = try reader.read(sig);
-
-            break :blk sig;
-        };
-
-        const sequence = try reader.readIntNative(u32);
-
-        return TxIn{
-            .previous_output = previous_output,
-            .script_sig = script_sig,
-            .sequence = sequence,
-            .witness = null,
-            .gpa = gpa,
-        };
-    }
-
-    fn write(self: @This(), writer: anytype) !void {
-        try self.previous_output.write(writer);
-
-        try writer.writeIntLittle(u8, @intCast(u8, self.script_sig.len));
-        try writer.writeAll(self.script_sig);
-
-        try writer.writeIntLittle(u32, self.sequence);
-    }
-
-    pub fn deinit(self: @This()) void {
-        self.gpa.free(self.script_sig);
-        if (self.witness) |w| w.deinit();
-    }
-};
-
-// Transaction Ouput contains a numeric value and a challenge for the receiver
-// to prove ownership. The receiver would consume the TxOut as a TxIn in a
-// subsequent Transaction.
+// Transaction Ouput contains a numeric value representing a transfer of Bitcoin
+// and a challenge for the receiver to prove ownership over the Bitcoin. The receiver
+// would consume the TxOut as a TxIn in a subsequent Transaction.
 pub const TxOut = struct {
     // The value of the transaction output in satoshis.
     value: u64,
 
-    // The locking script on the transaction output.
-    script_pubkey: []const u8,
+    // The locking script of the transaction output.
+    script_pubkey: ArrayList(u8),
 
     gpa: *mem.Allocator,
 
     fn serialized_len(self: @This()) usize {
         return @sizeOf(@TypeOf(self.value)) +
-            VarInt.init(self.script_pubkey.len).size() +
-            self.script_pubkey.len;
+            self.script_pubkey.items.len;
     }
 
     fn read(gpa: *mem.Allocator, reader: anytype) !TxOut {
         const value = try reader.readIntNative(u64);
 
-        // TODO: The script_pubkey does NOT include the script_pubkey_len,
-        // maybe I should include it in the script_pubkey variable?
+        var script_pubkey = ArrayList(u8).init(gpa);
+        errdefer script_pubkey.deinit();
+
         const script_pubkey_len = try reader.readByte();
-        const script_pubkey = try gpa.alloc(u8, script_pubkey_len);
-        errdefer gpa.free(script_pubkey);
-        _ = try reader.read(script_pubkey);
+        try script_pubkey.append(script_pubkey_len);
+
+        var i: usize = 0;
+        while (i < script_pubkey_len) : (i += 1) {
+            const byte = try reader.readByte();
+            try script_pubkey.append(byte);
+        }
 
         return TxOut{
             .value = value,
@@ -381,12 +395,11 @@ pub const TxOut = struct {
 
     fn write(self: @This(), writer: anytype) !void {
         try writer.writeIntLittle(u64, self.value);
-        try writer.writeIntLittle(u8, @intCast(u8, self.script_pubkey.len));
-        try writer.writeAll(self.script_pubkey);
+        try writer.writeAll(self.script_pubkey.items);
     }
 
     pub fn deinit(self: @This()) void {
-        self.gpa.free(self.script_pubkey);
+        self.script_pubkey.deinit();
     }
 };
 
@@ -421,15 +434,13 @@ pub const Witness = struct {
             try content.append(witness_len);
 
             // Add 1 to the witness_len to include the varint of the witness.
-            if (i == 0) {
-                last = witness_len + 1;
+            if (i == 0) last = witness_len + 1;
+
+            var j: usize = 0;
+            while (j < witness_len) : (j += 1) {
+                const byte = try reader.readByte();
+                try content.append(byte);
             }
-
-            const witness = try gpa.alloc(u8, witness_len);
-            defer gpa.free(witness);
-            _ = try reader.read(witness);
-
-            try content.appendSlice(witness);
         }
 
         return Witness{
@@ -497,20 +508,20 @@ test "non-segwit P2PKH tx" {
     mem.reverse(u8, prev_txid);
     try testing.expectEqualSlices(u8, &inputs[0].previous_output.txid, prev_txid);
     try testing.expectEqual(inputs[0].previous_output.vout, 0);
-    try testing.expectEqual(inputs[0].script_sig.len, 106);
+    try testing.expectEqual(inputs[0].script_sig.items.len, 107);
+    try testing.expectEqualSlices(u8, inputs[0].script_sig.items, try fmt.hexToBytes(&buf, "6a47304402207c8e61ffe680f21725e4e79306830b76e58b1b42f75f70a117c0fd6532a9e8960220536293629339a41ae72b23098ced2fe48425f94f7711b37ad466884bc02e4cef0121023abc81b1328f631fd90aca9d6eade0b260758deb9c6a1805915f1dc1491afd2e"));
     try testing.expectEqual(inputs[0].sequence, 0xFFFFFFFD);
     try testing.expectEqual(inputs[0].witness, null);
 
     const outputs = tx.outputs.items;
     try testing.expectEqual(outputs.len, 1);
 
-    // TODO: Should maybe convert this to full satoshis representation?
     try testing.expectEqual(outputs[0].value, 38739);
-    try testing.expectEqual(outputs[0].script_pubkey.len, 25);
+    try testing.expectEqual(outputs[0].script_pubkey.items.len, 26);
     try testing.expectEqualSlices(
         u8,
-        outputs[0].script_pubkey,
-        try fmt.hexToBytes(&buf, "76a914f36e80fa8a3f3b2b6b2bf3f4daa428099206157888ac"),
+        outputs[0].script_pubkey.items,
+        try fmt.hexToBytes(&buf, "1976a914f36e80fa8a3f3b2b6b2bf3f4daa428099206157888ac"),
     );
     try testing.expectEqual(tx.lock_time, 575190);
 
@@ -565,7 +576,7 @@ test "deserialize a Segwit transaction" {
     );
     try testing.expectEqualSlices(u8, &inputs[0].previous_output.txid, prev_txid);
     try testing.expectEqual(inputs[0].previous_output.vout, 1);
-    try testing.expectEqual(inputs[0].script_sig.len, 0);
+    try testing.expectEqual(inputs[0].script_sig.items.len, 0);
     try testing.expectEqual(inputs[0].sequence, 0xFFFFFFFF);
     try testing.expectEqual(inputs[0].witness.?.witness_elements, 2);
     try testing.expectEqual(inputs[0].witness.?.content.items.len, 107);
@@ -585,11 +596,11 @@ test "deserialize a Segwit transaction" {
     try testing.expectEqual(outputs.len, 1);
     // TODO: Should maybe convert this to full satoshis representation?
     try testing.expectEqual(outputs[0].value, 506078);
-    try testing.expectEqual(outputs[0].script_pubkey.len, 23);
+    try testing.expectEqual(outputs[0].script_pubkey.items.len, 24);
     try testing.expectEqualSlices(
         u8,
-        outputs[0].script_pubkey,
-        try fmt.hexToBytes(&buf, "a9140f3444e271620c736808aa7b33e370bd87cb5a0787"),
+        outputs[0].script_pubkey.items,
+        try fmt.hexToBytes(&buf, "17a9140f3444e271620c736808aa7b33e370bd87cb5a0787"),
     );
     try testing.expectEqual(tx.lock_time, 0);
 
