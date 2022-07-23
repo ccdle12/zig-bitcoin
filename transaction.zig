@@ -491,19 +491,22 @@ test "non-segwit P2PKH tx" {
         "1976a914f36e80fa8a3f3b2b6b2bf3f4daa428099206157888ac" ++ // script_pubkey
         "d6c60800"; // lock time
 
+    // Deserialize the tx hex bytes into a Transaction.
     var buf: [1024]u8 = undefined;
     const tx_bytes = try fmt.hexToBytes(&buf, tx_hex);
+
     const tx = try Transaction.read(
         testing.allocator,
         io.fixedBufferStream(tx_bytes).reader(),
     );
     defer tx.deinit();
 
-    // Assert that the tx can be serialized back to the original structure.
+    // Assert that the tx can be serialized back to the original tx_hex.
     var serialized = ArrayList(u8).init(testing.allocator);
     defer serialized.deinit();
     try tx.write(serialized.writer());
 
+    // var ser_bytes: [1024]u8 = undefined;
     try testing.expectEqualSlices(
         u8,
         try fmt.hexToBytes(&buf, tx_hex),
@@ -513,16 +516,18 @@ test "non-segwit P2PKH tx" {
     // Assert the correct txid can be generated.
     var tx_hash: U256 = undefined;
     try tx.txid(&tx_hash);
+
     const expected_tx_hash = try fmt.hexToBytes(&buf, "0556e5e4206759d0114151c27b67ffb593b0c05ea25a2a5f0d52b161687a4061");
     try testing.expectEqualSlices(u8, &tx_hash, expected_tx_hash);
 
-    // Assert the transaction is deserialized correctly.
+    // Assert the tx inputs are deserialized correctly.
     try testing.expectEqual(tx.version, 2);
     const inputs = tx.inputs.items;
     try testing.expectEqual(inputs.len, 1);
 
     var prev_txid = try fmt.hexToBytes(&buf, "855f90bf2f355457fb5c294f820457822a818c301bc8a395ca44209f8a6df768");
     mem.reverse(u8, prev_txid);
+
     try testing.expectEqualSlices(u8, &inputs[0].previous_output.txid, prev_txid);
     try testing.expectEqual(inputs[0].previous_output.vout, 0);
     try testing.expectEqual(inputs[0].script_sig.items.len, 107);
@@ -530,6 +535,7 @@ test "non-segwit P2PKH tx" {
     try testing.expectEqual(inputs[0].sequence, 0xFFFFFFFD);
     try testing.expectEqual(inputs[0].witness, null);
 
+    // Assert the tx outputs are deserialized correctly.
     const outputs = tx.outputs.items;
     try testing.expectEqual(outputs.len, 1);
 
@@ -575,13 +581,14 @@ test "deserialize a Segwit transaction" {
 
     var buf: [1024]u8 = undefined;
     const tx_bytes = try fmt.hexToBytes(&buf, tx_hex);
+
     const tx = try Transaction.read(
         testing.allocator,
         io.fixedBufferStream(tx_bytes).reader(),
     );
     defer tx.deinit();
 
-    // Assert the transaction is deserialized correctly.
+    // Assert the tx inputs are deserialized correctly.
     try testing.expectEqual(tx.version, 2);
     const inputs = tx.inputs.items;
     try testing.expectEqual(inputs.len, 1);
@@ -609,8 +616,10 @@ test "deserialize a Segwit transaction" {
         witness,
     );
 
+    // Assert the tx outputs are deserialized correctly.
     const outputs = tx.outputs.items;
     try testing.expectEqual(outputs.len, 1);
+
     // TODO: Should maybe convert this to full satoshis representation?
     try testing.expectEqual(outputs[0].value, 506078);
     try testing.expectEqual(outputs[0].script_pubkey.items.len, 24);
@@ -624,6 +633,7 @@ test "deserialize a Segwit transaction" {
     // Test the transaction serializes back to the correct bytes.
     var serialized = ArrayList(u8).init(testing.allocator);
     defer serialized.deinit();
+
     try tx.write(serialized.writer());
     try testing.expectEqualSlices(
         u8,
@@ -633,25 +643,29 @@ test "deserialize a Segwit transaction" {
 
     // Test hashing a transaction that does not include the witness (default behaviour).
     const expected_tx_hash = "f5864806e3565c34d1b41e716f72609d00b55ea5eac5b924c9719a842ef42206";
+
     var tx_hash: U256 = undefined;
     try tx.txid(&tx_hash);
+
     try testing.expectEqualSlices(
         u8,
         try fmt.hexToBytes(&buf, expected_tx_hash),
         &tx_hash,
     );
 
-    // Test hashing a tranaction that includes the witness.
+    // Test hashing a transaction that includes the witness.
     const expected_wtx_hash = "80b7d8a82d5d5bf92905b06f2014dd699e03837ca172e3a59d51426ebbe3e7f5";
+
     var wtx_hash: U256 = undefined;
     try tx.wtxid(&wtx_hash);
+
     try testing.expectEqualSlices(
         u8,
         try fmt.hexToBytes(&buf, expected_wtx_hash),
         &wtx_hash,
     );
 
-    // Test the weight calculations for the transaction are accurate.
+    // Test the weight calculations for the transaction is accurate.
     const expected_weight = 442;
     try testing.expectEqual(tx.weight(), expected_weight);
     try testing.expectEqual(tx.size(), tx_bytes.len);
