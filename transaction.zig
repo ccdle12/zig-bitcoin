@@ -18,14 +18,18 @@ pub const Transaction = struct {
     /// The protocol version (2 is the current default).
     version: i32 = 2,
 
-    /// Transaction inputs to fund the transaction.
+    /// Transaction inputs that fund a transaction.
     inputs: ArrayList(TxIn),
 
-    /// Transaction outputs used to send coins to receivers.
+    /// Transaction outputs used to transfer ownership of coins to the receivers.
     outputs: ArrayList(TxOut),
 
-    /// The time in blocks where the transaction will become valid. 0 indicates
-    /// it's valid immediately.
+    /// The time that a transaction is locked until a specific block height or
+    /// a future point in time (Unix).
+    ///
+    /// e.g.
+    ///     lock_time < 500000000 is block height
+    ///     lock_time >= 500000000 is unix timestamp
     lock_time: u32,
 
     gpa: *mem.Allocator,
@@ -106,14 +110,27 @@ pub const Transaction = struct {
         };
     }
 
-    fn write(self: @This(), writer: anytype) !void {
+    /// Serializes the Transaction and by default, adheres to Segwit.
+    /// Segwit BIP-141: https://github.com/bitcoin/bips/blob/master/bip-0141.mediawikik
+    fn write(self: Transaction, writer: anytype) !void {
         try self.internal_write(writer, true);
     }
 
-    /// The internal_write function has an include_witness flag that is mainly
-    /// used for serializing and hashing a txid. This gives the caller the option
-    /// to include the witness data in the transaction hash or omitting it (Segwit).
-    fn internal_write(self: @This(), writer: anytype, include_witness: bool) !void {
+    /// internal_write() contains a parameter: "include_witness". This allows
+    /// the caller to include the Segwit marker bytes and the witness data in the
+    /// serialized output.
+    ///
+    /// Serializing the tx has x2 main purposes:
+    ///     - Generating a tx hash
+    ///     - Serializing the tx for inclusion in a block
+    ///
+    /// For hashing purposes, "include_witness" is false by default, indicating
+    /// adherence to Segwit (hashing the tx WITHOUT Segwit marker bytes and witnesses).
+    ///
+    /// For serializing the tx for inclusion in a block, "include_witness" is true 
+    /// by default, since we MUST include the Segwit marker bytes and the witness
+    /// data.
+    fn internal_write(self: Transaction, writer: anytype, include_witness: bool) !void {
         try writer.writeIntLittle(i32, self.version);
 
         var is_segwit = false;
@@ -124,6 +141,7 @@ pub const Transaction = struct {
             }
         }
 
+        // Add the marker bytes to indicate the tx is Segwit.
         if (is_segwit and include_witness) {
             try writer.writeIntLittle(u8, 0x00);
             try writer.writeIntLittle(u8, 0x01);
@@ -135,6 +153,7 @@ pub const Transaction = struct {
         try VarInt.init(self.outputs.items.len).write(writer);
         for (self.outputs.items) |output| try output.write(writer);
 
+        // Assign the segregated witness data, linked to each input.
         if (is_segwit and include_witness) {
             for (self.inputs.items) |input| try input.witness.?.write(writer);
         }
@@ -142,18 +161,20 @@ pub const Transaction = struct {
         try writer.writeIntLittle(u32, self.lock_time);
     }
 
-    /// Returns the transaction hash that does not include the witness data. This
+    /// Returns the tx hash that does NOT include the witness data (Segwit). This
     /// is the default behaviour and should be used for all transactions.
-    fn txid(self: @This(), output: *U256) !void {
+    fn txid(self: Transaction, output: *U256) !void {
         try self.internal_hash(output, false);
     }
 
-    /// Returns the transaction hash that includes the witness data.
-    fn wtxid(self: @This(), output: *U256) !void {
+    /// Returns the tx hash that includes the witness data (Legacy format).
+    fn wtxid(self: Transaction, output: *U256) !void {
         try self.internal_hash(output, true);
     }
 
-    fn internal_hash(self: @This(), output: *U256, include_witness: bool) !void {
+    /// Hash function that serializes the tx and then hashes to the location
+    /// of the U256 output.
+    fn internal_hash(self: Transaction, output: *U256, include_witness: bool) !void {
         var serialized = ArrayList(u8).init(self.gpa);
         defer serialized.deinit();
 
@@ -163,35 +184,35 @@ pub const Transaction = struct {
         mem.reverse(u8, output);
     }
 
-    /// Returns the weight of the transaction. This method is able to add Segwit
-    /// weights if the transaction is Segwit.
-    fn weight(self: @This()) usize {
+    /// Returns the weight of the tx. This method is able to add the Segwit 
+    /// weights if the tx is Segwit.
+    fn weight(self: Transaction) usize {
         return self.internal_scale_size(witness_scale_factor, true);
     }
 
-    /// Returns the actual serialized byte size of the transaction, byte for byte.
-    fn size(self: @This()) usize {
+    /// Returns the actual serialized byte size of the tx, byte for byte.
+    fn size(self: Transaction) usize {
         return self.internal_scale_size(1, true);
     }
 
-    /// Returns the virtual size of the transaction. This is an alternative measurement
+    /// Returns the virtual size of the tx. This is an alternative measurement
     /// of the bytes, where one vbyte is equal to four weight units.
-    fn vsize(self: @This()) !usize {
+    fn vsize(self: Transaction) !usize {
         return try std.math.divCeil(usize, self.weight(), witness_scale_factor);
     }
 
-    /// The size of a transaction without witness data.
-    fn stripped_size(self: @This()) usize {
+    /// The size of a tx without witness data.
+    fn stripped_size(self: Transaction) usize {
         return self.internal_scale_size(1, false);
     }
 
-    /// Returns the size of the serialized transaction according to a particular
-    /// scale factor. This can be used to calculate the weight of the transaction
-    /// given the witness scale factor or bytes 1-to-1.
+    /// Returns the size of the serialized tx according to a particular
+    /// scale factor. This can be used to calculate the weight of the tx given 
+    /// the witness scale factor or a weight of 1-to-1 per byte.
     ///
-    /// include_witness flag also allows the witness to be ignored when calculating
+    /// "include_witness" flag allows the witness to be ignored when calculating
     /// the transaction size, even if the witness exists.
-    fn internal_scale_size(self: @This(), scale_factor: usize, include_witness: bool) usize {
+    fn internal_scale_size(self: Transaction, scale_factor: usize, include_witness: bool) usize {
         var input_weight: usize = 0;
         var inputs_with_witnesses: usize = 0;
         for (self.inputs.items) |input| {
@@ -199,8 +220,8 @@ pub const Transaction = struct {
             // per bytes.
             input_weight += scale_factor * input.serialized_len();
 
-            // Add Segwit bytes without applying the scale factor, each byte
-            // only has 1 weight.
+            // Add Segwit bytes without applying the scale factor, each Segwit
+            // byte has only 1 weight.
             if (include_witness) {
                 if (input.witness) |witness| {
                     inputs_with_witnesses += 1;
@@ -210,31 +231,27 @@ pub const Transaction = struct {
         }
 
         // If this is a Segwit transaction, add 2 bytes at 1 weight each to
-        // reflect the Segwit marker byte and Segwit flag byte in the transaction.
+        // reflect the Segwit marker byte and Segwit flag byte in the tx.
         if (inputs_with_witnesses > 0) input_weight += 2;
 
+        // Sum all other non-Segwit bytes and apply the scale_factor for the
+        // weight.
         var output_size: usize = 0;
         for (self.outputs.items) |output|
             output_size += output.serialized_len();
 
-        // Sum all other non-Segwit bytes and apply the scale_factor for the
-        // weight.
-        var non_input_weight = scale_factor *
+        const non_input_weight = scale_factor *
             (@sizeOf(@TypeOf(self.version)) +
             VarInt.init(self.inputs.items.len).size() +
             VarInt.init(self.outputs.items.len).size() +
             output_size +
             @sizeOf(@TypeOf(self.lock_time)));
 
-        const total_weight = non_input_weight + input_weight;
-
-        return switch (inputs_with_witnesses) {
-            0 => total_weight,
-            else => total_weight + self.inputs.items.len - inputs_with_witnesses,
-        };
+        const total_weight = input_weight + non_input_weight;
+        return total_weight;
     }
 
-    fn deinit(self: @This()) void {
+    fn deinit(self: Transaction) void {
         for (self.inputs.items) |input| input.deinit();
         self.inputs.deinit();
 
@@ -243,24 +260,24 @@ pub const Transaction = struct {
     }
 };
 
-// Transaction Input used to reference coins to consume in a Tranasction.
+/// Transaction Input used to reference previously unspent coins.
 pub const TxIn = struct {
-    // The previous transaction output that is going to be used.
+    /// The previous transaction output that is going to be used.
     previous_output: OutPoint,
 
-    // The opcodes as bytes used in the unlocking script to access the previous_output.
+    /// The opcodes as bytes used in the unlocking script to access the previous_output.
     script_sig: ArrayList(u8),
 
-    // Used to prioritize conflicting transactions. By default will be set to
-    // 0xFFFFFFFF to not use this feature.
+    /// Used to prioritize conflicting transactions. By default, it will be set to
+    /// 0xFFFFFFFF meaning this feature is not being used.
     sequence: u32 = 0xFFFFFFFF,
 
-    // TODO: Witness data comments
+    /// TODO: Witness data comments
     witness: ?Witness,
 
     gpa: *mem.Allocator,
 
-    // TODO: comments
+    /// TODO: comments
     fn serialized_len(self: @This()) usize {
         const script_sig_len = blk: {
             var len = VarInt.init(self.script_sig.items.len).size();
